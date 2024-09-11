@@ -7,13 +7,13 @@
 #include <set>
 #include <deque>
 #include <tuple>
+#include <map>
 
 #include "../lib/pos_EDS_to_GFA.cpp"
 
 namespace gedmap_parse_gfa{
 	using namespace std;
 	using namespace sdsl;
-
 
 	vector<string> seq_names;
 	uint32_t ORIG_NODE_NUMBER;
@@ -56,22 +56,22 @@ namespace gedmap_parse_gfa{
 		string ids;
 
 		//FOR TRACING BACK TO THE NODE
-		vector<uint32_t> orig_seq_idx;
-		vector<uint64_t> orig_seq_pos;
-		vector<uint32_t> orig_nodes;
-		vector<bool> 	  orientation;
-		vector<bool> 	  node_start;
+		vector<uint32_t>	orig_seq_idx;
+		vector<uint64_t>	orig_seq_pos;
+		vector<string>		orig_nodes;
+		vector<bool> 		orientation;
+		vector<bool>		node_start;
 
 		node_t(){type = 0;};
 
 		//node_t(string seq, string ids):seq(seq), ids(ids){type = ALIVE;};
 
-		node_t(string seq, size_t id, uint32_t name_idx, uint64_t pos):seq(seq){
+		node_t(string seq, string id, uint32_t name_idx, uint64_t pos):seq(seq){
 			type = ALIVE;
-			ids = to_string(id);
+			ids = id;
 			orig_seq_idx = vector<uint32_t>(1,name_idx);
 			orig_seq_pos = vector<uint64_t>(1,pos);
-			orig_nodes   = vector<uint32_t>(1,id);
+			orig_nodes   = vector<string>(1,id);
 			orientation  = vector<bool>(1,false);
 			node_start   = vector<bool>    (seq.size(),0);
 			node_start[0] = 1;
@@ -136,13 +136,14 @@ namespace gedmap_parse_gfa{
 
 	using adj_t = vector< pair< vector<edge_t>, vector<edge_t>>>;
 
-	uint32_t count_nodes(string fname_gfa){
+	tuple<uint32_t,uint32_t,uint32_t> count_nodes_edges(string fname_gfa){
 		ifstream gfa_in = ifstream(fname_gfa, ifstream::in);
 		std::string line;
-		uint32_t nc = 0;
+		uint32_t nc = 0, ec = 0;
 		uint32_t lines = 0;
 		while(std::getline(gfa_in, line)){
 			if(line.size()>0 && line[0]=='S') nc++;
+			if(line.size()>0 && line[0]=='L') ec++;
 			lines++;
 			if(!(lines%23957)) cout << "\r" << lines << " lines" << flush;
 		}
@@ -150,7 +151,7 @@ namespace gedmap_parse_gfa{
 		cout << "\r";
 
 		ORIG_NODE_NUMBER = nc;
-		return nc;
+		return make_tuple(nc,ec,lines);
 	}
 
 	void all_about(size_t i, vector<node_t> & V, adj_t & A, bool init=true){
@@ -251,7 +252,8 @@ namespace gedmap_parse_gfa{
 			size_t e; uint32_t s; tie(e,s) = S.back(); S.pop_back();
 			if( e != v){
 				auto & suc = A[e].second;
-				if( suc.empty() || s > width || suc.size() + observed_paths + S.size() > max_path_count) return false;
+				if( suc.empty()) return false;
+				if( suc.size() + observed_paths + S.size() > max_path_count) return false;
 
 				if( e!=u ) {
 					if(V[e].type & node_t::FUSED) return false;
@@ -259,12 +261,14 @@ namespace gedmap_parse_gfa{
 				}
 				for(auto x : suc) {
 					if(x.target == e) return false;
+					if( s + V[x.target].seq.size() > width)   return false;
 					S.emplace_back(x.target, s + V[x.target].seq.size());
 				}
 			}else{
 				observed_paths++;
 			}
 		}
+
 		//check_if_bubbly
 		uint32_t sum_of_outgoing_edges = A[u].second.size() ;
 		uint32_t sum_of_incoming_edges = A[v].first .size() ;
@@ -277,7 +281,6 @@ namespace gedmap_parse_gfa{
 	}
 
 	vector< vector <size_t> > paths_between(size_t u, size_t v,  adj_t & A){
-		// cout << "PATHS" << endl;
 		deque < vector<size_t> > Q;
 		vector< vector<size_t> > P;
 
@@ -309,7 +312,6 @@ namespace gedmap_parse_gfa{
 	}
 
 	char classify_bubble(vector< vector <size_t> >  & P,  vector<node_t> & V){
-		// cout << "CLASSIFY" << endl;
 		bool all_one     = true;
 		bool all_max_one = true;
 		bool snp         = true;
@@ -329,7 +331,6 @@ namespace gedmap_parse_gfa{
 	}
 
 	node_t bubble_to_brackets(vector< vector <size_t> >  & P,  vector<node_t> & V){
-		// cout << "TO BRACKETS" << endl;
 		size_t node_count = 0;
 		for(auto p: P) node_count += p.size();
 		if(node_count == 0) return node_t();
@@ -513,25 +514,27 @@ namespace gedmap_parse_gfa{
 		size_t seq_names_idx = -1;
 
 		std::string line;
-		uint32_t lines = 0;
 
-		cout << "count nodes" << endl;
-		uint32_t node_count = count_nodes(fname_gfa);
-		uint32_t edge_count = 0;
+		cout << "scan file: " << flush;
+		uint32_t node_count,edge_count,line_count, nc = 0, ec = 0, lines = 0;
+		tie(node_count, edge_count,line_count) = count_nodes_edges(fname_gfa);
+		cout << node_count << "nodes and "<< edge_count << " edges" << endl;
 		size_t tot_size = 0;
 
-		vector<node_t> V( node_count+1  ) ;
+		vector<node_t> V;
+		V.reserve(node_count+1);
+		map<string,size_t> name_to_Vid;
+
 		adj_t ADJ ( node_count+1  );
 
-
-		//vector<node> AL ( node_count  ) ;
 		ifstream GFA = ifstream(fname_gfa, ifstream::in);
 
-		cout << "read nodes       " << endl;
+		cout << "read nodes and edges       " << endl;
+		cout << std::setprecision(2) << std::fixed;
 
 		while(std::getline(GFA, line)) {     // '\n' is the default delimiter
 			lines++;
-			if(!(lines%23957)) cout << "\r" << lines << " lines" << flush;
+			if(!(lines%23957)) cout << "\r" << (nc/(double)(node_count))*100 << "% nodes " << (ec/(double)(edge_count))*100 <<  "% edges " <<flush;
 
 			std::istringstream iss(line);
 
@@ -544,27 +547,34 @@ namespace gedmap_parse_gfa{
 				case 'H': //HEADER
 					break;
 				case 'S': {//SEGMENT
+					nc++;
 					std::string name,seq;
 					iss >> name >> seq;
 					tot_size += seq.size();
-					size_t id = stoul(name);
 
 					string seq_name; uint64_t seq_off;
 					tie(seq_name, seq_off) = get_seq_data_from_line(iss);
 					seq_names_idx = get_index(seq_names, seq_name,  seq_names_idx);
 
-
-					V[ id ] = node_t(move(seq),id , seq_names_idx, seq_off);
-					if(id >= V.size()) throw runtime_error("read_gfa(): stoi(name) >= V.size()");
+					if(name_to_Vid.emplace(name,V.size()).second) //insert key-val pair to map (if false, key already exists)
+						V.emplace_back(move(seq),name , seq_names_idx, seq_off);
+					else
+						throw invalid_argument("Multiple segments with name >" + name + "< in gfa file");
 					break;
 				}
 				case 'L': {//LINK
+					ec++;
 					std::string from_s, to_s, overlap;
 					char from_o, to_o;
 
 					iss >> from_s >> from_o >> to_s >> to_o >> overlap;
-					size_t from = stoul(from_s);
-					size_t to   = stoul(to_s);
+					size_t from, to;
+					try{
+						from = name_to_Vid.at(from_s);
+						to   = name_to_Vid.at(to_s);
+					}catch(std::out_of_range & oor){
+						throw invalid_argument("Unspecified segment: Link: " + from_s + " > " + to_s  + " uses unspecified name in From or To field.");
+					}
 
 					ADJ[to]  .first.emplace_back(from, from_o, to_o);
 					ADJ[from].second.emplace_back(to , from_o, to_o);
@@ -583,9 +593,6 @@ namespace gedmap_parse_gfa{
 			}
 		}
 		cout << "\r";
-		/*cout <<   "-node_count " << node_count
-			<< "\n-edge_count " << edge_count
-			<< "\n-tot_size   " << tot_size << endl;*/
 		return make_pair(V,ADJ);
 	}
 
@@ -594,7 +601,7 @@ namespace gedmap_parse_gfa{
 		uint32_t alts = 0, bubbles = 0, snps = 0, indels = 0, fuse = 0 ;
 
 		for(size_t u = 0; u < V.size(); u++){
-			if(!(u%23957)) cout << "\r" << u << "/" << V.size() << flush;
+			if(!(u%23957)) cout << "\r" << (u / (double) V.size())*100 << "%" << flush;
 
 			if( ! V[u].alive() ) continue;
 			char t = bubble_start(u,V,A,BUB_max_length, BUB_max_path_c);
@@ -688,7 +695,7 @@ namespace gedmap_parse_gfa{
 
 		sdsl::int_vector<1> node_start_ind(seq_lenght,0,1);
 		//ENTRY PER NODE
-		sdsl::int_vector<0> node_number (seq_count, 0, bits8(ORIG_NODE_NUMBER)); //NUMBER IN GFA FILE
+		vector<string> node_name; node_name.reserve(ORIG_NODE_NUMBER);
 		sdsl::int_vector<1> orientation (seq_count, 0, 1);
 		sdsl::int_vector<0> seq_name_idx(seq_count, 0, bits8(seq_names.size())); //SEQ IDX IN SEQ_NAME
 		sdsl::int_vector<0> offset      (seq_count, 0, bits8(MAX_OFFSET));       //SEQ OFFSET OF NODE
@@ -710,13 +717,16 @@ namespace gedmap_parse_gfa{
 
 			edsg_out << V[i].seq;
 
-
-			write_to(node_number,  cur_node, V[i].orig_nodes);
+			append_to(node_name, V[i].orig_nodes);
 			write_to(orientation,  cur_node, V[i].orientation);
 			write_to(seq_name_idx, cur_node, V[i].orig_seq_idx);
 			write_to(offset,       cur_node, V[i].orig_seq_pos);
 
-			if(V[i].orig_nodes.size() != V[i].orientation.size() || V[i].orig_nodes.size() != V[i].orientation.size() ||V[i].orig_nodes.size() != V[i].orig_seq_idx.size() ||V[i].orig_nodes.size() != V[i].orig_seq_pos.size()) throw runtime_error("sizes do not match");
+			if(V[i].orig_nodes.size() != V[i].orientation.size()
+				||V[i].orig_nodes.size() != V[i].orientation.size()
+				||V[i].orig_nodes.size() != V[i].orig_seq_idx.size()
+				||V[i].orig_nodes.size() != V[i].orig_seq_pos.size())
+				throw runtime_error("sizes do not match");
 
 			cur_node += V[i].orig_nodes.size();
 		}
@@ -730,7 +740,7 @@ namespace gedmap_parse_gfa{
 
 		{
 			pos_EDS_to_GFA_type p2gfa(
-				move(node_number),
+				move(node_name),
 				move(orientation),
 				move(seq_name_idx),
 				move(offset),
@@ -815,6 +825,4 @@ namespace gedmap_parse_gfa{
 
 		return 0;
 	}
-
-
 }
